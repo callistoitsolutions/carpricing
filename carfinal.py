@@ -1,365 +1,336 @@
-"""
-=================================================================
-GLOBAL CAR PRICE PREDICTION SYSTEM WITH LOGIN & USER MANAGEMENT
-Login System + Admin Panel (Create/Edit/Delete Users) + Full Dashboard
-=================================================================
-"""
+# ======================================================
+# GLOBAL ULTRA ACCURATE CAR PRICE PREDICTION SYSTEM
+# ======================================================
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score
 from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 from datetime import datetime
 import io
-import hashlib
-import sqlite3
-import time
+import base64
 
-# ============================================================================
-# DATABASE INITIALIZATION & USER MANAGEMENT
-# ============================================================================
-
-def init_database():
-    """Initialize SQLite database"""
-    conn = sqlite3.connect('car_price_system.db', check_same_thread=False)
-    c = conn.cursor()
-    
-    # Users table
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  username TEXT UNIQUE NOT NULL,
-                  password_hash TEXT NOT NULL,
-                  email TEXT,
-                  full_name TEXT,
-                  phone TEXT,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  last_login TIMESTAMP,
-                  is_active BOOLEAN DEFAULT 1,
-                  role TEXT DEFAULT 'user')''')
-    
-    # Predictions history table
-    c.execute('''CREATE TABLE IF NOT EXISTS predictions
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id INTEGER,
-                  brand TEXT,
-                  model TEXT,
-                  year INTEGER,
-                  predicted_price INTEGER,
-                  timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  FOREIGN KEY (user_id) REFERENCES users (id))''')
-    
-    # Sessions table
-    c.execute('''CREATE TABLE IF NOT EXISTS sessions
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id INTEGER,
-                  login_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  logout_time TIMESTAMP,
-                  is_active BOOLEAN DEFAULT 1,
-                  FOREIGN KEY (user_id) REFERENCES users (id))''')
-    
-    # Create default admin
-    c.execute("SELECT * FROM users WHERE username = 'admin'")
-    if not c.fetchone():
-        admin_password = hashlib.sha256('admin123'.encode()).hexdigest()
-        c.execute("""INSERT INTO users (username, password_hash, email, full_name, role) 
-                     VALUES (?, ?, ?, ?, ?)""",
-                  ('admin', admin_password, 'admin@carprice.com', 'System Administrator', 'admin'))
-    
-    conn.commit()
-    conn.close()
-
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
-
-def verify_user(username, password):
-    """Verify and login user"""
-    conn = sqlite3.connect('car_price_system.db', check_same_thread=False)
-    c = conn.cursor()
-    
-    try:
-        password_hash = hash_password(password)
-        c.execute("""SELECT id, username, role, is_active, email, full_name 
-                     FROM users WHERE username = ? AND password_hash = ?""",
-                  (username, password_hash))
-        
-        user = c.fetchone()
-        
-        if user and user[3]:
-            user_id = user[0]
-            c.execute("UPDATE users SET last_login = ? WHERE id = ?", (datetime.now(), user_id))
-            c.execute("UPDATE sessions SET is_active = 0 WHERE user_id = ? AND is_active = 1", (user_id,))
-            c.execute("INSERT INTO sessions (user_id, login_time, is_active) VALUES (?, ?, ?)",
-                      (user_id, datetime.now(), 1))
-            conn.commit()
-            conn.close()
-            
-            return {
-                'id': user[0],
-                'username': user[1],
-                'role': user[2],
-                'is_active': user[3],
-                'email': user[4] or '',
-                'full_name': user[5] or username
-            }
-        
-        conn.close()
-        return None
-    except:
-        conn.close()
-        return None
-
-def create_user(username, password, email, full_name, phone, role='user'):
-    """Create new user"""
-    conn = sqlite3.connect('car_price_system.db', check_same_thread=False)
-    c = conn.cursor()
-    try:
-        password_hash = hash_password(password)
-        c.execute("""INSERT INTO users (username, password_hash, email, full_name, phone, role) 
-                     VALUES (?, ?, ?, ?, ?, ?)""",
-                  (username, password_hash, email, full_name, phone, role))
-        conn.commit()
-        conn.close()
-        return True, "User created successfully"
-    except sqlite3.IntegrityError:
-        conn.close()
-        return False, "Username already exists"
-    except Exception as e:
-        conn.close()
-        return False, str(e)
-
-def update_user(user_id, username, email, full_name, phone, is_active, password=None):
-    """Update user"""
-    conn = sqlite3.connect('car_price_system.db', check_same_thread=False)
-    c = conn.cursor()
-    try:
-        if password:
-            password_hash = hash_password(password)
-            c.execute("""UPDATE users 
-                         SET username = ?, email = ?, full_name = ?, phone = ?, 
-                             is_active = ?, password_hash = ?
-                         WHERE id = ?""",
-                      (username, email, full_name, phone, is_active, password_hash, user_id))
-        else:
-            c.execute("""UPDATE users 
-                         SET username = ?, email = ?, full_name = ?, phone = ?, is_active = ?
-                         WHERE id = ?""",
-                      (username, email, full_name, phone, is_active, user_id))
-        conn.commit()
-        conn.close()
-        return True, "User updated successfully"
-    except sqlite3.IntegrityError:
-        conn.close()
-        return False, "Username already exists"
-    except Exception as e:
-        conn.close()
-        return False, str(e)
-
-def delete_user(user_id):
-    """Delete user"""
-    conn = sqlite3.connect('car_price_system.db', check_same_thread=False)
-    c = conn.cursor()
-    try:
-        c.execute("DELETE FROM users WHERE id = ?", (user_id,))
-        conn.commit()
-        conn.close()
-        return True, "User deleted successfully"
-    except Exception as e:
-        conn.close()
-        return False, str(e)
-
-def get_user_by_id(user_id):
-    """Get user by ID"""
-    conn = sqlite3.connect('car_price_system.db', check_same_thread=False)
-    c = conn.cursor()
-    c.execute("""SELECT id, username, email, full_name, phone, is_active, role, created_at, last_login
-                 FROM users WHERE id = ?""", (user_id,))
-    user = c.fetchone()
-    conn.close()
-    return user
-
-def get_all_users():
-    """Get all users"""
-    conn = sqlite3.connect('car_price_system.db', check_same_thread=False)
-    c = conn.cursor()
-    c.execute("""SELECT id, username, email, full_name, phone, created_at, last_login, is_active, role 
-                 FROM users ORDER BY created_at DESC""")
-    users = c.fetchall()
-    conn.close()
-    return users
-
-def get_currently_logged_in_users():
-    """Get active users"""
-    conn = sqlite3.connect('car_price_system.db', check_same_thread=False)
-    c = conn.cursor()
-    c.execute("""
-        SELECT u.id, u.username, u.email, u.full_name, s.login_time, u.role
-        FROM sessions s
-        JOIN users u ON s.user_id = u.id
-        WHERE s.is_active = 1
-        ORDER BY s.login_time DESC
-    """)
-    users = c.fetchall()
-    conn.close()
-    return users
-
-def logout_user(user_id):
-    """Logout user"""
-    conn = sqlite3.connect('car_price_system.db', check_same_thread=False)
-    c = conn.cursor()
-    c.execute("UPDATE sessions SET is_active = 0, logout_time = ? WHERE user_id = ? AND is_active = 1",
-              (datetime.now(), user_id))
-    conn.commit()
-    conn.close()
-
-def save_prediction(user_id, brand, model, year, predicted_price):
-    """Save prediction to history"""
-    conn = sqlite3.connect('car_price_system.db', check_same_thread=False)
-    c = conn.cursor()
-    c.execute("""INSERT INTO predictions (user_id, brand, model, year, predicted_price) 
-                 VALUES (?, ?, ?, ?, ?)""",
-              (user_id, brand, model, year, predicted_price))
-    conn.commit()
-    conn.close()
-
-def get_user_predictions(user_id):
-    """Get user's prediction history"""
-    conn = sqlite3.connect('car_price_system.db', check_same_thread=False)
-    c = conn.cursor()
-    c.execute("""SELECT brand, model, year, predicted_price, timestamp 
-                 FROM predictions WHERE user_id = ? ORDER BY timestamp DESC LIMIT 20""",
-              (user_id,))
-    predictions = c.fetchall()
-    conn.close()
-    return predictions
-
-def get_user_stats(user_id):
-    """Get user statistics"""
-    conn = sqlite3.connect('car_price_system.db', check_same_thread=False)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM predictions WHERE user_id = ?", (user_id,))
-    total_predictions = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM sessions WHERE user_id = ?", (user_id,))
-    total_logins = c.fetchone()[0]
-    conn.close()
-    return {'total_predictions': total_predictions, 'total_logins': total_logins}
-
-def get_system_stats():
-    """Get system stats"""
-    conn = sqlite3.connect('car_price_system.db', check_same_thread=False)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM users WHERE role = 'user'")
-    total_users = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM sessions WHERE is_active = 1")
-    currently_online = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM predictions")
-    total_predictions = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM sessions WHERE DATE(login_time) = DATE('now')")
-    today_logins = c.fetchone()[0]
-    conn.close()
-    return {
-        'total_users': total_users,
-        'currently_online': currently_online,
-        'total_predictions': total_predictions,
-        'today_logins': today_logins
-    }
-
-# ============================================================================
-# CAR DATABASE - COMPREHENSIVE GLOBAL DATABASE
-# ============================================================================
+# ========================================
+# COMPREHENSIVE GLOBAL CAR DATABASE
+# ========================================
 
 CAR_DATABASE = {
+    # INDIAN BRANDS
     'Maruti Suzuki': {
-        'models': ['Alto', 'Swift', 'Baleno', 'Dzire', 'Ertiga', 'Vitara Brezza', 'Wagon R', 'Celerio'],
-        'base_prices': [300000, 800000, 900000, 850000, 1100000, 1000000, 600000, 550000]
+        'models': ['Alto', 'Alto K10', 'S-Presso', 'Celerio', 'Wagon R', 'Ignis', 'Swift', 'Baleno', 'Dzire', 'Ciaz', 
+                  'Ertiga', 'XL6', 'Vitara Brezza', 'Jimny', 'Fronx', 'Grand Vitara', 'Eeco', 'Omni'],
+        'base_prices': [300000, 400000, 450000, 550000, 600000, 650000, 800000, 900000, 850000, 950000,
+                       1100000, 1300000, 1000000, 1250000, 950000, 1200000, 500000, 250000]
     },
     'Tata': {
-        'models': ['Tiago', 'Tigor', 'Altroz', 'Nexon', 'Punch', 'Harrier', 'Safari', 'Nexon EV'],
-        'base_prices': [450000, 550000, 700000, 950000, 650000, 1800000, 2000000, 1600000]
+        'models': ['Tiago', 'Tigor', 'Altroz', 'Nexon', 'Punch', 'Harrier', 'Safari', 'Nexon EV', 'Tigor EV', 'Tiago EV',
+                  'Indica', 'Indigo', 'Sumo', 'Hexa'],
+        'base_prices': [450000, 550000, 700000, 950000, 650000, 1800000, 2000000, 1600000, 1300000, 850000,
+                       200000, 250000, 400000, 1200000]
     },
     'Mahindra': {
-        'models': ['Bolero', 'Scorpio', 'XUV300', 'XUV700', 'Thar', 'Marazzo', 'Scorpio N'],
-        'base_prices': [850000, 1500000, 1100000, 1600000, 1500000, 1200000, 1700000]
+        'models': ['Bolero', 'Scorpio', 'XUV300', 'XUV400', 'XUV700', 'Thar', 'Marazzo', 'Bolero Neo', 'Scorpio N',
+                  'KUV100', 'TUV300', 'Alturas G4', 'XUV500'],
+        'base_prices': [850000, 1500000, 1100000, 1700000, 1600000, 1500000, 1200000, 950000, 1700000,
+                       500000, 850000, 2800000, 1400000]
     },
+    
+    # JAPANESE BRANDS
     'Toyota': {
-        'models': ['Innova Crysta', 'Fortuner', 'Glanza', 'Urban Cruiser', 'Camry', 'Vellfire'],
-        'base_prices': [2000000, 3500000, 750000, 1200000, 4500000, 9000000]
+        'models': ['Innova Crysta', 'Fortuner', 'Glanza', 'Urban Cruiser Hyryder', 'Camry', 'Vellfire', 'Hilux', 
+                  'Etios', 'Corolla Altis', 'Innova Hycross', 'Land Cruiser', 'Prius', 'RAV4', 'Highlander'],
+        'base_prices': [2000000, 3500000, 750000, 1200000, 4500000, 9000000, 3800000, 
+                       600000, 1600000, 1900000, 10000000, 4000000, 3500000, 5000000]
     },
     'Honda': {
-        'models': ['Amaze', 'City', 'Jazz', 'WR-V', 'Elevate', 'Civic', 'CR-V'],
-        'base_prices': [750000, 1200000, 850000, 950000, 1200000, 2000000, 3200000]
+        'models': ['Amaze', 'City', 'Jazz', 'WR-V', 'Elevate', 'Civic', 'CR-V', 'Brio', 'Accord', 'Odyssey'],
+        'base_prices': [750000, 1200000, 850000, 950000, 1200000, 2000000, 3200000, 500000, 4500000, 5500000]
     },
+    'Nissan': {
+        'models': ['Magnite', 'Kicks', 'Micra', 'Sunny', 'GT-R', 'Patrol', 'X-Trail', 'Leaf', 'Altima', '370Z'],
+        'base_prices': [600000, 1100000, 700000, 800000, 22000000, 7000000, 3500000, 4000000, 3500000, 6000000]
+    },
+    'Mazda': {
+        'models': ['Mazda2', 'Mazda3', 'Mazda6', 'CX-3', 'CX-5', 'CX-9', 'MX-5 Miata', 'CX-30'],
+        'base_prices': [2500000, 3000000, 4000000, 3200000, 3800000, 5500000, 4500000, 3500000]
+    },
+    'Mitsubishi': {
+        'models': ['Mirage', 'Lancer', 'Outlander', 'Pajero Sport', 'Eclipse Cross', 'Montero'],
+        'base_prices': [1500000, 2000000, 3500000, 3800000, 3200000, 5000000]
+    },
+    'Suzuki': {
+        'models': ['Vitara', 'S-Cross', 'Jimny', 'Swift Sport'],
+        'base_prices': [2500000, 2000000, 1800000, 1500000]
+    },
+    'Subaru': {
+        'models': ['Impreza', 'Legacy', 'Outback', 'Forester', 'WRX', 'BRZ', 'Ascent'],
+        'base_prices': [3000000, 3500000, 4000000, 3800000, 4500000, 4000000, 5000000]
+    },
+    'Lexus': {
+        'models': ['ES', 'IS', 'GS', 'LS', 'NX', 'RX', 'LX', 'UX', 'LC'],
+        'base_prices': [6000000, 6500000, 7500000, 15000000, 7000000, 8500000, 20000000, 5500000, 18000000]
+    },
+    'Infiniti': {
+        'models': ['Q50', 'Q60', 'Q70', 'QX50', 'QX60', 'QX80'],
+        'base_prices': [5500000, 6500000, 7000000, 6000000, 7500000, 9500000]
+    },
+    'Acura': {
+        'models': ['ILX', 'TLX', 'RLX', 'RDX', 'MDX', 'NSX'],
+        'base_prices': [4500000, 5500000, 7000000, 6000000, 7500000, 25000000]
+    },
+    
+    # KOREAN BRANDS
     'Hyundai': {
-        'models': ['i10', 'i20', 'Verna', 'Creta', 'Venue', 'Alcazar', 'Tucson'],
-        'base_prices': [500000, 700000, 1100000, 1400000, 950000, 2000000, 2800000]
+        'models': ['i10', 'i20', 'Aura', 'Grand i10 Nios', 'Verna', 'Creta', 'Venue', 'Alcazar', 'Tucson', 
+                  'Kona Electric', 'Santro', 'Elantra', 'Ioniq 5', 'Palisade', 'Santa Fe', 'Genesis GV70'],
+        'base_prices': [500000, 700000, 650000, 600000, 1100000, 1400000, 950000, 2000000, 2800000, 
+                       2400000, 450000, 1800000, 4500000, 5500000, 4500000, 8000000]
     },
     'Kia': {
-        'models': ['Seltos', 'Sonet', 'Carens', 'Carnival', 'EV6'],
-        'base_prices': [1200000, 850000, 1300000, 3300000, 6500000]
+        'models': ['Seltos', 'Sonet', 'Carens', 'Carnival', 'EV6', 'Rio', 'Stinger', 'Sportage', 'Sorento', 'Telluride'],
+        'base_prices': [1200000, 850000, 1300000, 3300000, 6500000, 700000, 6000000, 3500000, 4500000, 5500000]
     },
+    'Genesis': {
+        'models': ['G70', 'G80', 'G90', 'GV60', 'GV70', 'GV80'],
+        'base_prices': [6500000, 8000000, 12000000, 7500000, 8500000, 10000000]
+    },
+    
+    # GERMAN LUXURY BRANDS
     'BMW': {
-        'models': ['3 Series', '5 Series', '7 Series', 'X1', 'X3', 'X5', 'X7'],
-        'base_prices': [5000000, 6800000, 15000000, 4700000, 6200000, 8500000, 12000000]
+        'models': ['1 Series', '2 Series', '3 Series', '4 Series', '5 Series', '6 Series', '7 Series', '8 Series',
+                  'X1', 'X2', 'X3', 'X4', 'X5', 'X6', 'X7', 'Z4', 'i3', 'i4', 'iX', 'M2', 'M3', 'M4', 'M5', 'M8'],
+        'base_prices': [4000000, 4500000, 5000000, 6000000, 6800000, 8000000, 15000000, 18000000,
+                       4700000, 4900000, 6200000, 7500000, 8500000, 10000000, 12000000, 7000000, 
+                       5500000, 7200000, 11500000, 9000000, 10000000, 11000000, 14000000, 20000000]
     },
     'Mercedes-Benz': {
-        'models': ['A-Class', 'C-Class', 'E-Class', 'S-Class', 'GLA', 'GLC', 'GLE', 'GLS'],
-        'base_prices': [4700000, 6000000, 7800000, 17000000, 5200000, 6500000, 7800000, 10000000]
+        'models': ['A-Class', 'B-Class', 'C-Class', 'E-Class', 'S-Class', 'CLA', 'CLS', 'GLA', 'GLB', 'GLC', 
+                  'GLE', 'GLS', 'G-Class', 'EQC', 'EQS', 'AMG GT', 'Maybach S-Class', 'Maybach GLS'],
+        'base_prices': [4700000, 5000000, 6000000, 7800000, 17000000, 5500000, 9000000, 5200000, 5800000, 6500000,
+                       7800000, 10000000, 18000000, 9900000, 15000000, 25000000, 28000000, 35000000]
     },
     'Audi': {
-        'models': ['A3', 'A4', 'A6', 'Q3', 'Q5', 'Q7', 'Q8'],
-        'base_prices': [4500000, 5500000, 7000000, 5200000, 6800000, 8200000, 10000000]
+        'models': ['A1', 'A3', 'A4', 'A5', 'A6', 'A7', 'A8', 'Q2', 'Q3', 'Q4 e-tron', 'Q5', 'Q7', 'Q8', 
+                  'e-tron', 'TT', 'R8', 'RS3', 'RS5', 'RS6', 'RS7', 'RSQ8'],
+        'base_prices': [3800000, 4500000, 5500000, 6500000, 7000000, 8500000, 13000000, 4200000, 5200000, 7500000,
+                       6800000, 8200000, 10000000, 10000000, 7500000, 28000000, 8500000, 10500000, 15000000, 18000000, 20000000]
+    },
+    'Volkswagen': {
+        'models': ['Polo', 'Vento', 'Virtus', 'Taigun', 'Tiguan', 'Golf', 'Passat', 'Arteon', 'Touareg', 'ID.4'],
+        'base_prices': [700000, 900000, 1100000, 1300000, 3200000, 3500000, 4500000, 5500000, 8000000, 6500000]
+    },
+    'Porsche': {
+        'models': ['718 Cayman', '718 Boxster', '911 Carrera', '911 Turbo', 'Panamera', 'Macan', 'Cayenne', 'Taycan'],
+        'base_prices': [10000000, 11000000, 18000000, 28000000, 15000000, 8500000, 12000000, 15000000]
+    },
+    
+    # AMERICAN BRANDS
+    'Ford': {
+        'models': ['EcoSport', 'Endeavour', 'Figo', 'Aspire', 'Mustang', 'F-150', 'Explorer', 'Escape', 
+                  'Edge', 'Expedition', 'Ranger', 'Bronco', 'Mach-E'],
+        'base_prices': [850000, 3200000, 600000, 650000, 8000000, 5500000, 6000000, 3500000,
+                       4500000, 7000000, 4000000, 5000000, 7500000]
+    },
+    'Chevrolet': {
+        'models': ['Spark', 'Cruze', 'Malibu', 'Camaro', 'Corvette', 'Equinox', 'Traverse', 'Tahoe', 'Suburban', 'Silverado'],
+        'base_prices': [1000000, 2500000, 3500000, 6500000, 12000000, 3800000, 5500000, 7500000, 8500000, 5000000]
+    },
+    'Jeep': {
+        'models': ['Compass', 'Meridian', 'Wrangler', 'Grand Cherokee', 'Cherokee', 'Renegade', 'Gladiator'],
+        'base_prices': [2000000, 3500000, 6500000, 8500000, 4500000, 2500000, 7000000]
+    },
+    'Dodge': {
+        'models': ['Challenger', 'Charger', 'Durango', 'Journey', 'Grand Caravan'],
+        'base_prices': [6000000, 6500000, 5500000, 3500000, 4000000]
+    },
+    'Chrysler': {
+        'models': ['300', 'Pacifica', 'Voyager'],
+        'base_prices': [5500000, 5000000, 4500000]
+    },
+    'Cadillac': {
+        'models': ['CT4', 'CT5', 'XT4', 'XT5', 'XT6', 'Escalade', 'Lyriq'],
+        'base_prices': [6000000, 7500000, 6500000, 7500000, 8500000, 12000000, 10000000]
     },
     'Tesla': {
-        'models': ['Model 3', 'Model S', 'Model X', 'Model Y'],
-        'base_prices': [6000000, 12000000, 13000000, 7500000]
-    }
+        'models': ['Model 3', 'Model S', 'Model X', 'Model Y', 'Cybertruck', 'Roadster'],
+        'base_prices': [6000000, 12000000, 13000000, 7500000, 8500000, 28000000]
+    },
+    'GMC': {
+        'models': ['Sierra', 'Canyon', 'Terrain', 'Acadia', 'Yukon', 'Hummer EV'],
+        'base_prices': [5500000, 4000000, 4500000, 5500000, 8000000, 15000000]
+    },
+    'Lincoln': {
+        'models': ['Corsair', 'Nautilus', 'Aviator', 'Navigator'],
+        'base_prices': [6500000, 7500000, 8500000, 11000000]
+    },
+    
+    # BRITISH BRANDS
+    'Land Rover': {
+        'models': ['Defender', 'Discovery', 'Discovery Sport', 'Range Rover Evoque', 'Range Rover Velar', 
+                  'Range Rover Sport', 'Range Rover'],
+        'base_prices': [9000000, 8500000, 6500000, 6800000, 8500000, 14000000, 22000000]
+    },
+    'Jaguar': {
+        'models': ['XE', 'XF', 'XJ', 'F-Type', 'E-Pace', 'F-Pace', 'I-Pace'],
+        'base_prices': [6000000, 7500000, 12000000, 11000000, 6500000, 8500000, 12000000]
+    },
+    'Bentley': {
+        'models': ['Continental GT', 'Flying Spur', 'Bentayga', 'Mulsanne'],
+        'base_prices': [35000000, 38000000, 45000000, 50000000]
+    },
+    'Rolls-Royce': {
+        'models': ['Ghost', 'Wraith', 'Dawn', 'Phantom', 'Cullinan'],
+        'base_prices': [55000000, 60000000, 65000000, 80000000, 70000000]
+    },
+    'Aston Martin': {
+        'models': ['Vantage', 'DB11', 'DBS', 'DBX', 'Rapide'],
+        'base_prices': [28000000, 35000000, 45000000, 38000000, 40000000]
+    },
+    'McLaren': {
+        'models': ['GT', '570S', '720S', 'Artura', 'P1'],
+        'base_prices': [32000000, 28000000, 48000000, 38000000, 150000000]
+    },
+    'Lotus': {
+        'models': ['Elise', 'Exige', 'Evora', 'Emira'],
+        'base_prices': [8000000, 10000000, 12000000, 9500000]
+    },
+    
+    # ITALIAN BRANDS
+    'Ferrari': {
+        'models': ['Portofino', 'Roma', 'F8 Tributo', 'SF90 Stradale', '812 Superfast', 'Purosangue'],
+        'base_prices': [38000000, 42000000, 55000000, 85000000, 65000000, 75000000]
+    },
+    'Lamborghini': {
+        'models': ['Huracán', 'Aventador', 'Urus'],
+        'base_prices': [45000000, 75000000, 50000000]
+    },
+    'Maserati': {
+        'models': ['Ghibli', 'Quattroporte', 'Levante', 'GranTurismo', 'MC20'],
+        'base_prices': [15000000, 18000000, 16000000, 22000000, 45000000]
+    },
+    'Alfa Romeo': {
+        'models': ['Giulia', 'Stelvio', '4C'],
+        'base_prices': [6500000, 7500000, 8500000]
+    },
+    'Fiat': {
+        'models': ['500', 'Panda', 'Tipo', '500X', '500L'],
+        'base_prices': [1500000, 1200000, 1800000, 2000000, 2200000]
+    },
+    
+    # FRENCH BRANDS
+    'Renault': {
+        'models': ['Kwid', 'Triber', 'Kiger', 'Duster', 'Captur', 'Koleos', 'Megane', 'Clio'],
+        'base_prices': [400000, 650000, 750000, 1100000, 1500000, 3500000, 2500000, 2000000]
+    },
+    'Peugeot': {
+        'models': ['208', '308', '508', '2008', '3008', '5008'],
+        'base_prices': [2000000, 2800000, 4500000, 2500000, 3500000, 4500000]
+    },
+    'Citroën': {
+        'models': ['C3', 'C3 Aircross', 'C5 Aircross', 'Berlingo'],
+        'base_prices': [700000, 900000, 3500000, 2500000]
+    },
+    'Bugatti': {
+        'models': ['Chiron', 'Divo', 'Centodieci'],
+        'base_prices': [280000000, 500000000, 800000000]
+    },
+    
+    # CHINESE BRANDS
+    'BYD': {
+        'models': ['Atto 3', 'E6', 'Han', 'Tang', 'Seal', 'Dolphin'],
+        'base_prices': [3400000, 2900000, 6500000, 5500000, 4500000, 3000000]
+    },
+    'MG': {
+        'models': ['Hector', 'Astor', 'Gloster', 'ZS EV', 'Comet EV', 'Windsor'],
+        'base_prices': [1500000, 1300000, 3200000, 2200000, 800000, 1200000]
+    },
+    'Geely': {
+        'models': ['Coolray', 'Azkarra', 'Okavango', 'Emgrand'],
+        'base_prices': [2000000, 2500000, 2800000, 1500000]
+    },
+    'NIO': {
+        'models': ['ES6', 'ES8', 'ET7', 'ET5'],
+        'base_prices': [6500000, 8000000, 7500000, 5500000]
+    },
+    'Xpeng': {
+        'models': ['P7', 'P5', 'G3', 'G9'],
+        'base_prices': [5500000, 4500000, 4000000, 6500000]
+    },
+    
+    # SWEDISH BRANDS
+    'Volvo': {
+        'models': ['S60', 'S90', 'V60', 'V90', 'XC40', 'XC60', 'XC90', 'C40 Recharge'],
+        'base_prices': [6500000, 8500000, 7000000, 8000000, 5500000, 7500000, 10000000, 7500000]
+    },
+    'Polestar': {
+        'models': ['Polestar 2', 'Polestar 3'],
+        'base_prices': [6500000, 9500000]
+    },
+    'Koenigsegg': {
+        'models': ['Jesko', 'Gemera', 'Regera'],
+        'base_prices': [300000000, 180000000, 200000000]
+    },
+    
+    # CZECH BRANDS
+    'Skoda': {
+        'models': ['Rapid', 'Slavia', 'Kushaq', 'Kodiaq', 'Octavia', 'Superb', 'Karoq'],
+        'base_prices': [800000, 1100000, 1200000, 3500000, 2800000, 3500000, 2500000]
+    },
 }
 
-FUEL_TYPES = ["Petrol", "Diesel", "CNG", "Electric", "Hybrid"]
-TRANSMISSIONS = ["Manual", "Automatic", "CVT", "DCT", "AMT"]
+FUEL_TYPES = ["Petrol", "Diesel", "CNG", "Electric", "Hybrid", "LPG", "Hydrogen"]
+TRANSMISSIONS = ["Manual", "Automatic", "CVT", "DCT", "AMT", "Sequential", "Dual-Clutch"]
 CAR_CONDITIONS = ["Excellent", "Very Good", "Good", "Fair", "Poor"]
 OWNER_TYPES = ["First", "Second", "Third", "Fourth & Above"]
 INSURANCE_STATUS = ["Comprehensive", "Third Party", "Expired", "No Insurance"]
-CITIES = ["Delhi", "Mumbai", "Bangalore", "Chennai", "Pune", "Hyderabad", "Kolkata"]
+COLORS = ["White", "Black", "Silver", "Grey", "Red", "Blue", "Brown", "Green", "Yellow", "Orange", "Purple", "Gold", "Other"]
+CITIES = ["Delhi", "Mumbai", "Bangalore", "Chennai", "Pune", "Hyderabad", "Kolkata", "Ahmedabad", "Surat", "Jaipur", 
+          "Lucknow", "Chandigarh", "London", "New York", "Tokyo", "Dubai", "Paris", "Berlin", "Los Angeles", "Shanghai"]
 
-# ============================================================================
-# CAR PRICE PREDICTION ENGINE
-# ============================================================================
+# ========================================
+# ULTRA ACCURATE PRICE PREDICTION ENGINE
+# ========================================
 
-class CarPricePredictor:
+class UltraAccurateCarPricePredictor:
     def __init__(self):
         self.model = None
+        self.scaler = StandardScaler()
         self.encoders = {}
         self.is_trained = False
-    
+        self.training_data = None
+        
     def get_base_price(self, brand, model):
-        """Get base price from database"""
+        """Get accurate base price from database"""
         try:
             if brand in CAR_DATABASE and model in CAR_DATABASE[brand]['models']:
                 model_index = CAR_DATABASE[brand]['models'].index(model)
                 return CAR_DATABASE[brand]['base_prices'][model_index]
-            return 500000
+            else:
+                return 500000
         except:
             return 500000
-    
+
     def calculate_accurate_price(self, input_data):
-        """Calculate price using advanced formula"""
+        """Calculate ultra accurate price using advanced formula"""
         try:
             base_price = self.get_base_price(input_data['Brand'], input_data['Model'])
             
             # Fuel type adjustment
             fuel_multipliers = {
-                "Petrol": 1.0, "Diesel": 1.12, "CNG": 0.92, "Electric": 1.65, "Hybrid": 1.35
+                "Petrol": 1.0, "Diesel": 1.12, "CNG": 0.92, "Electric": 1.65, 
+                "Hybrid": 1.35, "LPG": 0.88, "Hydrogen": 1.75
             }
             base_price *= fuel_multipliers.get(input_data['Fuel_Type'], 1.0)
             
             # Transmission adjustment
             transmission_multipliers = {
-                "Manual": 1.0, "Automatic": 1.18, "CVT": 1.15, "DCT": 1.22, "AMT": 1.08
+                "Manual": 1.0, "Automatic": 1.18, "CVT": 1.15, "DCT": 1.22, 
+                "AMT": 1.08, "Sequential": 1.25, "Dual-Clutch": 1.23
             }
             base_price *= transmission_multipliers.get(input_data['Transmission'], 1.0)
             
@@ -371,21 +342,35 @@ class CarPricePredictor:
                 depreciation = 0.10
             elif car_age == 1:
                 depreciation = 0.25
-            elif car_age <= 3:
+            elif car_age == 2:
+                depreciation = 0.35
+            elif car_age == 3:
                 depreciation = 0.45
-            elif car_age <= 5:
+            elif car_age == 4:
+                depreciation = 0.53
+            elif car_age == 5:
                 depreciation = 0.60
             else:
                 depreciation = min(0.75, 0.60 + (car_age - 5) * 0.05)
             
             # Mileage impact
             mileage = input_data['Mileage']
-            if mileage <= 30000:
+            if mileage <= 10000:
+                mileage_impact = 0
+            elif mileage <= 30000:
                 mileage_impact = 0.03
+            elif mileage <= 50000:
+                mileage_impact = 0.07
             elif mileage <= 80000:
                 mileage_impact = 0.12
-            else:
+            elif mileage <= 120000:
+                mileage_impact = 0.18
+            elif mileage <= 200000:
                 mileage_impact = 0.25
+            else:
+                mileage_impact = 0.35
+            
+            total_depreciation = depreciation + mileage_impact
             
             # Condition multiplier
             condition_multipliers = {
@@ -398,429 +383,464 @@ class CarPricePredictor:
             }
             
             # Calculate final price
-            total_depreciation = depreciation + mileage_impact
             depreciated_price = base_price * (1 - total_depreciation)
             final_price = depreciated_price * condition_multipliers[input_data['Condition']] * owner_multipliers[input_data['Owner_Type']]
             
             # City adjustment
-            city_premium = {"Delhi": 1.04, "Mumbai": 1.06, "Bangalore": 1.05, "Chennai": 1.02}
+            city_premium = {
+                "Delhi": 1.04, "Mumbai": 1.06, "Bangalore": 1.05, "Chennai": 1.02, 
+                "Pune": 1.03, "Hyderabad": 1.03, "London": 1.15, "New York": 1.18,
+                "Tokyo": 1.12, "Dubai": 1.20, "Paris": 1.14, "Berlin": 1.08
+            }
             final_price *= city_premium.get(input_data['Registration_City'], 1.0)
             
+            # Insurance adjustment
+            if input_data['Insurance_Status'] == 'Comprehensive':
+                final_price *= 1.03
+            elif input_data['Insurance_Status'] == 'Expired':
+                final_price *= 0.98
+            
             return max(100000, int(final_price))
-        except:
-            return 500000
+            
+        except Exception as e:
+            return self.fallback_calculation(input_data)
     
+    def fallback_calculation(self, input_data):
+        """Simple fallback calculation"""
+        base_price = self.get_base_price(input_data['Brand'], input_data['Model'])
+        current_year = datetime.now().year
+        age = current_year - input_data['Year']
+        age_factor = max(0.3, 1 - (age * 0.15))
+        
+        condition_multipliers = {
+            "Excellent": 1.0, "Very Good": 0.9, "Good": 0.8, "Fair": 0.7, "Poor": 0.5
+        }
+        
+        price = base_price * age_factor * condition_multipliers[input_data['Condition']]
+        return max(100000, int(price))
+
+    def get_market_price_range(self, brand, model, year, condition):
+        """Get accurate market price range"""
+        try:
+            base_price = self.get_base_price(brand, model)
+            current_year = datetime.now().year
+            age = current_year - year
+            
+            if age == 0:
+                dep_factor = 0.85
+            elif age == 1:
+                dep_factor = 0.70
+            elif age == 2:
+                dep_factor = 0.60
+            elif age == 3:
+                dep_factor = 0.52
+            elif age == 4:
+                dep_factor = 0.45
+            elif age == 5:
+                dep_factor = 0.40
+            else:
+                dep_factor = max(0.25, 0.40 - (age - 5) * 0.03)
+            
+            avg_price = base_price * dep_factor
+            
+            condition_factors = {
+                "Excellent": 1.1, "Very Good": 1.0, "Good": 0.9, "Fair": 0.75, "Poor": 0.6
+            }
+            avg_price *= condition_factors[condition]
+            
+            min_price = avg_price * 0.85
+            max_price = avg_price * 1.15
+            
+            return [int(min_price), int(avg_price), int(max_price)]
+            
+        except:
+            return [300000, 500000, 700000]
+
+    def load_csv_data(self, uploaded_file):
+        """Load CSV data for training"""
+        try:
+            df = pd.read_csv(uploaded_file)
+            st.success(f"✅ Successfully loaded {len(df)} records from CSV")
+            return df
+        except Exception as e:
+            st.error(f"Error loading CSV: {str(e)}")
+            return None
+
+    def train_from_csv(self, df, selected_brand=None, selected_model=None):
+        """Train model from CSV data with optional filtering"""
+        try:
+            st.info("🔄 Training advanced model from CSV data...")
+            
+            df_processed = df.copy()
+            
+            # Handle Price_INR
+            if 'Price_INR' in df_processed.columns and 'Price' not in df_processed.columns:
+                df_processed['Price'] = df_processed['Price_INR']
+                st.success("✅ Mapped 'Price_INR' → 'Price'")
+            
+            # Flexible column mapping
+            column_mapping = {
+                'brand': 'Brand', 'car_brand': 'Brand',
+                'model': 'Model', 'car_model': 'Model',
+                'year': 'Year', 'manufacture_year': 'Year',
+                'fuel': 'Fuel_Type', 'fuel_type': 'Fuel_Type',
+                'transmission': 'Transmission',
+                'mileage': 'Mileage', 'km_driven': 'Mileage',
+                'condition': 'Condition', 'car_condition': 'Condition',
+                'price': 'Price', 'selling_price': 'Price', 'price_inr': 'Price'
+            }
+            
+            for old_col, new_col in column_mapping.items():
+                matching_cols = [col for col in df_processed.columns if str(col).lower() == old_col.lower()]
+                if matching_cols and new_col not in df_processed.columns:
+                    actual_col = matching_cols[0]
+                    df_processed[new_col] = df_processed[actual_col]
+                    st.success(f"✅ Mapped '{actual_col}' → '{new_col}'")
+            
+            # Filter by brand and model if selected
+            if selected_brand and selected_brand != "All":
+                df_processed = df_processed[df_processed['Brand'] == selected_brand]
+                st.info(f"🔍 Filtered for brand: {selected_brand}")
+                
+                if selected_model and selected_model != "All":
+                    df_processed = df_processed[df_processed['Model'] == selected_model]
+                    st.info(f"🔍 Filtered for model: {selected_model}")
+            
+            # Required columns
+            required_columns = ['Brand', 'Model', 'Year', 'Fuel_Type', 'Transmission', 
+                              'Mileage', 'Condition', 'Price']
+            
+            missing_columns = [col for col in required_columns if col not in df_processed.columns]
+            if missing_columns:
+                st.error(f"Missing columns: {missing_columns}")
+                return False
+            
+            # Clean data
+            df_clean = df_processed.dropna()
+            if len(df_clean) < 5:
+                st.error("Not enough data after cleaning")
+                return False
+            
+            st.success(f"✅ Using {len(df_clean)} records for training")
+            
+            # Prepare features
+            features = ['Brand', 'Model', 'Year', 'Fuel_Type', 'Transmission', 'Mileage', 'Condition']
+            X = df_clean[features]
+            y = df_clean['Price']
+            
+            # Show filtered data summary
+            if selected_brand or selected_model:
+                st.subheader("📊 Filtered Data Summary")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Records", len(df_clean))
+                with col2:
+                    st.metric("Avg Price", f"₹{y.mean():,.0f}")
+                with col3:
+                    st.metric("Price Range", f"₹{y.min():,.0f} - ₹{y.max():,.0f}")
+                
+                # Show sample of filtered data
+                with st.expander("View Filtered Data"):
+                    st.dataframe(df_clean.head(10))
+            
+            # Encode categorical variables
+            categorical_features = ['Brand', 'Model', 'Fuel_Type', 'Transmission', 'Condition']
+            for feature in categorical_features:
+                self.encoders[feature] = LabelEncoder()
+                X[feature] = self.encoders[feature].fit_transform(X[feature].astype(str))
+            
+            # Train model
+            self.model = RandomForestRegressor(n_estimators=100, random_state=42)
+            self.model.fit(X, y)
+            self.is_trained = True
+            self.training_data = df_clean
+            
+            # Evaluate
+            y_pred = self.model.predict(X)
+            r2 = r2_score(y, y_pred)
+            mae = mean_absolute_error(y, y_pred)
+            
+            st.success(f"✅ Model trained! R²: {r2:.3f}, MAE: ₹{mae:,.0f}")
+            return True
+            
+        except Exception as e:
+            st.error(f"Training error: {str(e)}")
+            return False
+
     def predict_price(self, input_data):
         """Main prediction function"""
-        return self.calculate_accurate_price(input_data)
-    
-    def get_market_price_range(self, brand, model, year, condition):
-        """Get market price range"""
-        base_price = self.get_base_price(brand, model)
-        current_year = datetime.now().year
-        age = current_year - year
-        
-        dep_factor = max(0.25, 0.85 - (age * 0.12))
-        avg_price = base_price * dep_factor
-        
-        condition_factors = {"Excellent": 1.1, "Very Good": 1.0, "Good": 0.9, "Fair": 0.75, "Poor": 0.6}
-        avg_price *= condition_factors[condition]
-        
-        return [int(avg_price * 0.85), int(avg_price), int(avg_price * 1.15)]
-
-# ============================================================================
-# LOGIN PAGE
-# ============================================================================
-
-def show_login_page():
-    """Display login page"""
-    st.markdown("""
-        <style>
-        .login-container {
-            max-width: 400px;
-            margin: 80px auto;
-            padding: 40px;
-            background: white;
-            border-radius: 15px;
-            box-shadow: 0 8px 16px rgba(0,0,0,0.1);
-        }
-        </style>
-    """, unsafe_allow_html=True)
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    
-    with col2:
-        st.markdown('<div class="login-container">', unsafe_allow_html=True)
-        st.markdown('<div style="font-size: 70px; text-align: center;">🚗</div>', unsafe_allow_html=True)
-        st.markdown('<h1 style="text-align: center; color: #1f77b4;">Car Price Predictor</h1>', unsafe_allow_html=True)
-        
-        st.markdown("### 🔐 Sign In")
-        
-        username = st.text_input("Username", key="login_user")
-        password = st.text_input("Password", type="password", key="login_pass")
-        
-        col_btn1, col_btn2 = st.columns(2)
-        
-        with col_btn1:
-            if st.button("🔓 Login", use_container_width=True, type="primary"):
-                if username and password:
-                    user = verify_user(username, password)
-                    if user:
-                        st.session_state.logged_in = True
-                        st.session_state.user = user
-                        st.success(f"✅ Welcome, {user['full_name']}!")
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.error("❌ Invalid credentials")
-                else:
-                    st.warning("⚠️ Enter username & password")
-        
-        with col_btn2:
-            if st.button("🔑 Demo", use_container_width=True):
-                st.info("**Admin:**\nUsername: `admin`\nPassword: `admin123`")
-        
-        st.markdown('</div>', unsafe_allow_html=True)
-
-# ============================================================================
-# PAGE CONFIGURATION
-# ============================================================================
-
-st.set_page_config(
-    page_title="Car Price Predictor Pro",
-    page_icon="🚗",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Initialize
-init_database()
-
-if 'logged_in' not in st.session_state:
-    st.session_state.logged_in = False
-if 'user' not in st.session_state:
-    st.session_state.user = None
-if 'predictor' not in st.session_state:
-    st.session_state.predictor = CarPricePredictor()
-
-# Check login
-if not st.session_state.logged_in:
-    show_login_page()
-    st.stop()
-
-# ============================================================================
-# CSS STYLING
-# ============================================================================
-
-st.markdown("""
-<style>
-    .main {
-        background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-    }
-    .user-info {
-        background: #f0f8ff;
-        padding: 15px;
-        border-radius: 10px;
-        margin-bottom: 20px;
-    }
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1.2rem;
-        border-radius: 12px;
-        color: white;
-        text-align: center;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# ============================================================================
-# SIDEBAR
-# ============================================================================
-
-with st.sidebar:
-    user_stats = get_user_stats(st.session_state.user['id'])
-    st.markdown(f"""
-    <div class='user-info'>
-        <h3>👤 {st.session_state.user['full_name']}</h3>
-        <p><b>@{st.session_state.user['username']}</b></p>
-        <p>Role: <b>{st.session_state.user['role'].upper()}</b></p>
-        <hr>
-        <p>📊 Predictions: <b>{user_stats['total_predictions']}</b></p>
-        <p>🔑 Logins: <b>{user_stats['total_logins']}</b></p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    if st.button("🚪 Logout", use_container_width=True, type="primary"):
-        logout_user(st.session_state.user['id'])
-        st.session_state.logged_in = False
-        st.session_state.user = None
-        st.rerun()
-
-# ============================================================================
-# ADMIN DASHBOARD
-# ============================================================================
-
-if st.session_state.user['role'] == 'admin':
-    
-    st.title("👑 Admin Dashboard - Car Price Prediction System")
-    
-    # System Stats
-    sys_stats = get_system_stats()
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("👥 Users", sys_stats['total_users'])
-    with col2:
-        st.metric("🟢 Online", sys_stats['currently_online'])
-    with col3:
-        st.metric("📊 Predictions", sys_stats['total_predictions'])
-    with col4:
-        st.metric("🕒 Today Logins", sys_stats['today_logins'])
-    
-    st.markdown("---")
-    
-    # Main Tabs
-    main_tab = st.radio("", ["🚗 Car Price Predictor", "👥 User Management"], horizontal=True)
-    
-    # CAR PRICE PREDICTOR TAB
-    if main_tab == "🚗 Car Price Predictor":
-        st.markdown("## 🎯 Predict Car Price")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            brand = st.selectbox("Brand", sorted(list(CAR_DATABASE.keys())))
-            if brand in CAR_DATABASE:
-                model = st.selectbox("Model", sorted(CAR_DATABASE[brand]['models']))
-                base_price = st.session_state.predictor.get_base_price(brand, model)
-                st.info(f"**Base Price:** ₹{base_price:,}")
-            
-            year = st.slider("Year", 2000, datetime.now().year, datetime.now().year - 3)
-            fuel_type = st.selectbox("Fuel Type", FUEL_TYPES)
-            transmission = st.selectbox("Transmission", TRANSMISSIONS)
-        
-        with col2:
-            mileage = st.number_input("Mileage (km)", 0, 500000, 30000, 5000)
-            condition = st.selectbox("Condition", CAR_CONDITIONS)
-            owner_type = st.selectbox("Owner", OWNER_TYPES)
-            insurance = st.selectbox("Insurance", INSURANCE_STATUS)
-            city = st.selectbox("City", sorted(CITIES))
-        
-        if st.button("🎯 Predict Price", type="primary", use_container_width=True):
-            input_data = {
-                'Brand': brand, 'Model': model, 'Year': year,
-                'Fuel_Type': fuel_type, 'Transmission': transmission,
-                'Mileage': mileage, 'Condition': condition,
-                'Owner_Type': owner_type, 'Insurance_Status': insurance,
-                'Registration_City': city
-            }
-            
-            predicted_price = st.session_state.predictor.predict_price(input_data)
-            market_prices = st.session_state.predictor.get_market_price_range(brand, model, year, condition)
-            
-            save_prediction(st.session_state.user['id'], brand, model, year, predicted_price)
-            
-            st.success(f"## 🎯 Predicted Price: ₹{predicted_price:,}")
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Market Low", f"₹{market_prices[0]:,}")
-            with col2:
-                st.metric("Market Avg", f"₹{market_prices[1]:,}")
-            with col3:
-                st.metric("Market High", f"₹{market_prices[2]:,}")
-    
-    # USER MANAGEMENT TAB
-    else:
-        st.markdown("## 👥 User Management")
-        
-        user_tabs = st.tabs(["🟢 Active Users", "➕ Create", "📋 All Users", "✏️ Edit", "🗑️ Delete"])
-        
-        # ACTIVE USERS
-        with user_tabs[0]:
-            st.subheader("🟢 Currently Online")
-            if st.button("🔄 Refresh"):
-                st.rerun()
-            
-            active_users = get_currently_logged_in_users()
-            if active_users:
-                for user in active_users:
-                    st.markdown(f"""
-<div style='background:#e8f5e9;padding:15px;border-radius:10px;margin:10px 0;'>
-    <b>{user[3]}</b> (@{user[1]}) - {user[5]}<br>
-    <small>📧 {user[2] or 'N/A'} | 🕒 {user[4]}</small>
-</div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.warning("No users online")
-        
-        # CREATE USER
-        with user_tabs[1]:
-            st.subheader("➕ Create New User")
-            with st.form("create_form"):
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    new_user = st.text_input("Username *")
-                    new_name = st.text_input("Full Name *")
-                    new_email = st.text_input("Email")
-                with col_b:
-                    new_phone = st.text_input("Phone")
-                    new_pass = st.text_input("Password *", type="password")
-                    confirm_pass = st.text_input("Confirm *", type="password")
+        if self.is_trained:
+            try:
+                features = ['Brand', 'Model', 'Year', 'Fuel_Type', 'Transmission', 'Mileage', 'Condition']
+                input_df = pd.DataFrame([input_data])
                 
-                if st.form_submit_button("✅ Create User", type="primary"):
-                    if new_user and new_pass and new_name and new_pass == confirm_pass and len(new_pass) >= 6:
-                        success, msg = create_user(new_user, new_pass, new_email, new_name, new_phone)
-                        if success:
-                            st.success(f"✅ User created!\n\nUsername: `{new_user}`\nPassword: `{new_pass}`")
-                            time.sleep(2)
-                            st.rerun()
-                        else:
-                            st.error(f"❌ {msg}")
-        
-        # ALL USERS
-        with user_tabs[2]:
-            st.subheader("📋 All Users")
-            users = get_all_users()
-            df = pd.DataFrame(users, columns=['ID', 'Username', 'Email', 'Name', 'Phone', 'Created', 'Last Login', 'Active', 'Role'])
-            st.dataframe(df, use_container_width=True)
-        
-        # EDIT USER
-        with user_tabs[3]:
-            st.subheader("✏️ Edit User")
-            all_users = get_all_users()
-            user_options = {f"{u[0]} - {u[1]} ({u[3]})": u[0] for u in all_users}
-            selected = st.selectbox("Select User", list(user_options.keys()))
-            
-            if selected:
-                uid = user_options[selected]
-                if uid != 1:
-                    user_det = get_user_by_id(uid)
-                    if user_det:
-                        with st.form("edit_form"):
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                ed_user = st.text_input("Username", value=user_det[1])
-                                ed_name = st.text_input("Name", value=user_det[3] or "")
-                                ed_email = st.text_input("Email", value=user_det[2] or "")
-                            with col2:
-                                ed_phone = st.text_input("Phone", value=user_det[4] or "")
-                                ed_active = st.selectbox("Status", [1, 0], format_func=lambda x: "Active" if x == 1 else "Inactive", index=0 if user_det[5] else 1)
-                                ed_pass = st.text_input("New Password (optional)", type="password")
-                            
-                            if st.form_submit_button("💾 Update", type="primary"):
-                                success, msg = update_user(uid, ed_user, ed_email, ed_name, ed_phone, ed_active, ed_pass if ed_pass else None)
-                                if success:
-                                    st.success(f"✅ {msg}")
-                                    time.sleep(1)
-                                    st.rerun()
-                                else:
-                                    st.error(f"❌ {msg}")
-                else:
-                    st.warning("Cannot edit admin account")
-        
-        # DELETE USER
-        with user_tabs[4]:
-            st.subheader("🗑️ Delete User")
-            st.warning("⚠️ Permanent action!")
-            all_del = get_all_users()
-            del_options = {f"{u[0]} - {u[1]} ({u[3]})": u[0] for u in all_del}
-            selected_del = st.selectbox("Select User to Delete", list(del_options.keys()))
-            
-            if selected_del:
-                del_id = del_options[selected_del]
-                if del_id != 1:
-                    user_del = get_user_by_id(del_id)
-                    if user_del:
-                        st.markdown(f"**Username:** {user_del[1]}\n**Name:** {user_del[3]}")
-                        confirm = st.checkbox("I confirm deletion")
-                        if confirm and st.button("🗑️ DELETE", type="primary"):
-                            success, msg = delete_user(del_id)
-                            if success:
-                                st.success(f"✅ {msg}")
-                                time.sleep(1)
-                                st.rerun()
-                            else:
-                                st.error(f"❌ {msg}")
-                else:
-                    st.error("Cannot delete admin")
+                for feature in ['Brand', 'Model', 'Fuel_Type', 'Transmission', 'Condition']:
+                    if feature in self.encoders:
+                        try:
+                            input_df[feature] = self.encoders[feature].transform([input_data[feature]])[0]
+                        except:
+                            return self.calculate_accurate_price(input_data)
+                
+                prediction = self.model.predict(input_df[features])[0]
+                return max(100000, int(prediction))
+            except:
+                return self.calculate_accurate_price(input_data)
+        else:
+            return self.calculate_accurate_price(input_data)
 
-# ============================================================================
-# USER DASHBOARD
-# ============================================================================
+# ========================================
+# STREAMLIT UI COMPONENTS
+# ========================================
 
-else:
-    st.title("🚗 Car Price Prediction System")
+def main():
+    if 'predictor' not in st.session_state:
+        st.session_state.predictor = UltraAccurateCarPricePredictor()
     
-    tab1, tab2 = st.tabs(["🎯 Predict Price", "📜 My History"])
+    st.set_page_config(
+        page_title="Global Car Price Predictor", 
+        layout="wide", 
+        initial_sidebar_state="expanded"
+    )
     
-    # PREDICT TAB
-    with tab1:
-        st.subheader("🎯 Predict Car Price")
+    st.title("🚗 Global Ultra Accurate Car Price Prediction System")
+    st.markdown("### **Real Market Prices with Advanced Depreciation Analysis - Worldwide Coverage**")
+    
+    # Sidebar
+    with st.sidebar:
+        st.title("Navigation")
+        page = st.radio("Go to", [
+            "🎯 Price Prediction", 
+            "📊 Market Analysis",
+            "📁 CSV Training",
+            "🌍 Brand Explorer"
+        ])
         
-        col1, col2 = st.columns(2)
+        st.markdown("---")
+        st.subheader("🌍 Global Database")
+        total_brands = len(CAR_DATABASE)
+        total_models = sum(len(CAR_DATABASE[brand]['models']) for brand in CAR_DATABASE)
+        st.info(f"""
+        **Coverage:**
+        - 🏢 Brands: {total_brands}
+        - 🚗 Models: {total_models}
+        - 🌎 Worldwide
+        - 💎 Luxury & Super Luxury
+        """)
+    
+    # Page routing
+    if page == "🎯 Price Prediction":
+        show_prediction_interface()
+    elif page == "📊 Market Analysis":
+        show_market_analysis()
+    elif page == "📁 CSV Training":
+        show_csv_training()
+    elif page == "🌍 Brand Explorer":
+        show_brand_explorer()
+
+def show_prediction_interface():
+    st.subheader("🎯 Ultra Accurate Price Prediction")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        brand = st.selectbox("Select Brand", sorted(list(CAR_DATABASE.keys())))
         
-        with col1:
-            brand = st.selectbox("Brand", sorted(list(CAR_DATABASE.keys())))
-            if brand in CAR_DATABASE:
-                model = st.selectbox("Model", sorted(CAR_DATABASE[brand]['models']))
-                base_price = st.session_state.predictor.get_base_price(brand, model)
-                st.info(f"**Base Price:** ₹{base_price:,}")
-            
-            year = st.slider("Year", 2000, datetime.now().year, datetime.now().year - 3)
-            fuel_type = st.selectbox("Fuel", FUEL_TYPES)
-            transmission = st.selectbox("Transmission", TRANSMISSIONS)
+        if brand in CAR_DATABASE:
+            model = st.selectbox("Select Model", sorted(CAR_DATABASE[brand]['models']))
+            base_price = st.session_state.predictor.get_base_price(brand, model)
+            st.info(f"**Base New Price:** ₹{base_price:,}")
         
-        with col2:
-            mileage = st.number_input("Mileage (km)", 0, 500000, 30000, 5000)
-            condition = st.selectbox("Condition", CAR_CONDITIONS)
-            owner_type = st.selectbox("Owner", OWNER_TYPES)
-            insurance = st.selectbox("Insurance", INSURANCE_STATUS)
-            city = st.selectbox("City", sorted(CITIES))
-        
-        if st.button("🎯 Predict Price", type="primary", use_container_width=True):
+        current_year = datetime.now().year
+        year = st.slider("Manufacturing Year", 2000, current_year, current_year - 3)
+        fuel_type = st.selectbox("Fuel Type", FUEL_TYPES)
+        transmission = st.selectbox("Transmission", TRANSMISSIONS)
+    
+    with col2:
+        mileage = st.number_input("Mileage (km)", min_value=0, max_value=500000, value=30000, step=5000)
+        condition = st.selectbox("Condition", CAR_CONDITIONS)
+        owner_type = st.selectbox("Owner Type", OWNER_TYPES)
+        insurance_status = st.selectbox("Insurance Status", INSURANCE_STATUS)
+        registration_city = st.selectbox("Registration City", sorted(CITIES))
+    
+    if st.button("🎯 Get Ultra Accurate Price", type="primary", use_container_width=True):
+        with st.spinner('Calculating ultra accurate price...'):
             input_data = {
                 'Brand': brand, 'Model': model, 'Year': year,
                 'Fuel_Type': fuel_type, 'Transmission': transmission,
                 'Mileage': mileage, 'Condition': condition,
-                'Owner_Type': owner_type, 'Insurance_Status': insurance,
-                'Registration_City': city
+                'Owner_Type': owner_type, 'Insurance_Status': insurance_status,
+                'Registration_City': registration_city
             }
             
             predicted_price = st.session_state.predictor.predict_price(input_data)
             market_prices = st.session_state.predictor.get_market_price_range(brand, model, year, condition)
             
-            save_prediction(st.session_state.user['id'], brand, model, year, predicted_price)
-            
             st.success(f"## 🎯 Predicted Price: ₹{predicted_price:,}")
             
+            st.subheader("📊 Market Comparison")
             col1, col2, col3 = st.columns(3)
             with col1:
                 st.metric("Market Low", f"₹{market_prices[0]:,}")
             with col2:
-                st.metric("Market Avg", f"₹{market_prices[1]:,}")
+                st.metric("Market Average", f"₹{market_prices[1]:,}")
             with col3:
                 st.metric("Market High", f"₹{market_prices[2]:,}")
-    
-    # HISTORY TAB
-    with tab2:
-        st.subheader("📜 My Prediction History")
-        predictions = get_user_predictions(st.session_state.user['id'])
-        if predictions:
-            for pred in predictions:
-                st.markdown(f"""
-<div style='background:#f5f5f5;padding:12px;border-radius:6px;margin:8px 0;'>
-    <b>{pred[0]} {pred[1]} ({pred[2]})</b><br>
-    <small>Predicted: ₹{pred[3]:,} | {pred[4]}</small>
-</div>
-                """, unsafe_allow_html=True)
-        else:
-            st.info("No predictions yet")
+            
+            st.subheader("📈 Price Analysis")
+            base_price = st.session_state.predictor.get_base_price(brand, model)
+            depreciation = base_price - predicted_price
+            depreciation_percent = (depreciation / base_price) * 100
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Original Price", f"₹{base_price:,}")
+            with col2:
+                st.metric("Total Depreciation", f"₹{depreciation:,}", f"-{depreciation_percent:.1f}%")
 
-# Footer
-st.markdown("---")
-st.markdown(f"""
-<div style='text-align: center; color: #666;'>
-    <p>🔐 {st.session_state.user['full_name']} (@{st.session_state.user['username']}) | Role: {st.session_state.user['role'].upper()}</p>
-    <p>🚗 Car Price Prediction System Pro | © 2025</p>
-</div>
-""", unsafe_allow_html=True)
+def show_market_analysis():
+    st.subheader("📊 Car Market Analysis")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        brand = st.selectbox("Select Brand", sorted(list(CAR_DATABASE.keys())))
+        
+        if brand in CAR_DATABASE:
+            model = st.selectbox("Select Model", sorted(CAR_DATABASE[brand]['models']))
+            
+            st.subheader("💰 Price Depreciation Over Years")
+            
+            base_price = st.session_state.predictor.get_base_price(brand, model)
+            current_year = datetime.now().year
+            
+            price_data = []
+            for years_old in range(0, 10):
+                year = current_year - years_old
+                input_data = {
+                    'Brand': brand, 'Model': model, 'Year': year,
+                    'Fuel_Type': 'Petrol', 'Transmission': 'Manual',
+                    'Mileage': years_old * 12000, 'Condition': 'Very Good',
+                    'Owner_Type': 'First', 'Insurance_Status': 'Comprehensive',
+                    'Registration_City': 'Mumbai'
+                }
+                price = st.session_state.predictor.predict_price(input_data)
+                price_data.append({'Year': year, 'Price': price, 'Age': years_old})
+            
+            price_df = pd.DataFrame(price_data)
+            fig = px.line(price_df, x='Age', y='Price', 
+                         title=f'{brand} {model} - Price Depreciation Curve',
+                         labels={'Age': 'Years Old', 'Price': 'Price (₹)'})
+            st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        st.subheader("🏷️ Top Luxury Brands")
+        luxury_brands = ['Ferrari', 'Lamborghini', 'Rolls-Royce', 'Bentley', 
+                        'Bugatti', 'McLaren', 'Porsche', 'Aston Martin']
+        
+        luxury_data = []
+        for lux_brand in luxury_brands:
+            if lux_brand in CAR_DATABASE:
+                models = CAR_DATABASE[lux_brand]['models']
+                avg_price = sum(CAR_DATABASE[lux_brand]['base_prices']) / len(models)
+                luxury_data.append({
+                    'Brand': lux_brand,
+                    'Models': len(models),
+                    'Avg Price': avg_price
+                })
+        
+        if luxury_data:
+            luxury_df = pd.DataFrame(luxury_data)
+            fig = px.bar(luxury_df, x='Brand', y='Avg Price',
+                        title='Luxury Brand Average Prices',
+                        color='Avg Price')
+            st.plotly_chart(fig, use_container_width=True)
+
+def show_csv_training():
+    st.subheader("📁 CSV Data Training with Brand/Model Filter")
+    
+    st.info("""
+    **Upload CSV and optionally filter by specific Brand/Model for targeted training.**
+    The system will automatically recognize different column names.
+    """)
+    
+    uploaded_file = st.file_uploader("Choose CSV file", type=['csv'])
+    
+    if uploaded_file is not None:
+        df = st.session_state.predictor.load_csv_data(uploaded_file)
+        
+        if df is not None:
+            st.write("### Dataset Preview")
+            st.dataframe(df.head())
+            
+            # Brand and Model filter options
+            st.subheader("🔍 Filter Training Data (Optional)")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Get unique brands from CSV
+                if 'Brand' in df.columns:
+                    available_brands = ["All"] + sorted(df['Brand'].unique().tolist())
+                    selected_brand = st.selectbox("Filter by Brand", available_brands)
+                else:
+                    selected_brand = "All"
+                    st.warning("No 'Brand' column found in CSV")
+            
+            with col2:
+                # Get unique models for selected brand
+                if 'Model' in df.columns and selected_brand != "All":
+                    brand_df = df[df['Brand'] == selected_brand]
+                    available_models = ["All"] + sorted(brand_df['Model'].unique().tolist())
+                    selected_model = st.selectbox("Filter by Model", available_models)
+                else:
+                    selected_model = "All"
+            
+            # Show filtered count
+            if selected_brand != "All":
+                filtered_df = df[df['Brand'] == selected_brand]
+                if selected_model != "All":
+                    filtered_df = filtered_df[filtered_df['Model'] == selected_model]
+                st.info(f"📊 Will train on {len(filtered_df)} records after filtering")
+            
+            if st.button("🚀 Train Model from CSV", type="primary"):
+                success = st.session_state.predictor.train_from_csv(
+                    df, 
+                    selected_brand if selected_brand != "All" else None,
+                    selected_model if selected_model != "All" else None
+                )
+                if success:
+                    st.balloons()
+                    st.success("Model trained successfully! Now using AI for predictions.")
+
+def show_brand_explorer():
+    st.subheader("🌍 Global Brand Explorer")
+    
+    # Brand categories
+    categories = {
+        "🇮🇳 Indian Brands": ['Maruti Suzuki', 'Tata', 'Mahindra'],
+        "🇯🇵 Japanese Brands": ['Toyota', 'Honda', 'Nissan', 'Mazda', 'Mitsubishi', 'Suzuki', 'Subaru', 'Lexus', 'Infiniti', 'Acura'],
+        "🇰🇷 Korean Brands": ['Hyundai', 'Kia', 'Genesis'],
+        "🇩🇪 German Brands": ['BMW', 'Mercedes-Benz', 'Audi', 'Volkswagen', 'Porsche'],
+        "🇺🇸 American Brands": ['Ford', 'Chevrolet', 'Jeep', 'Dodge', 'Chrysler', 'Cadillac', 'Tesla', 'GMC', 'Lincoln'],
+        "🇬🇧 British Brands": ['Land Rover', 'Jaguar', 'Bentley', 'Rolls-Royce', 'Aston Martin', 'McLaren', 'Lotus'],
+        "🇮🇹 Italian Brands": ['Ferrari', 'Lamborghini', 'Maserati', 'Alfa Romeo', 'Fiat'],
+        "🇫🇷 French Brands": ['Renault', 'Peugeot', 'Citroën', 'Bugatti'],
+        "🇨🇳 Chinese Brands": ['BYD', 'MG', 'Geely', 'NIO', 'Xpeng'],
+        "🇸🇪 Swedish Brands": ['Volvo', 'Polestar', 'Koenigsegg'],
+        "🇨🇿 Czech Brands": ['Skoda']
+    }
+    
+    for category, brands in categories.items():
+        with st.expander(f"{category} ({len(brands)} brands)"):
+            for brand in brands:
+                if brand in CAR_DATABASE:
+                    models = CAR_DATABASE[brand]['models']
+                    prices = CAR_DATABASE[brand]['base_prices']
+                    st.write(f"**{brand}** - {len(models)} models")
+                    st.write(f"Price Range: ₹{min(prices):,} - ₹{max(prices):,}")
+                    with st.expander(f"View {brand} models"):
+                        for i, model in enumerate(models):
+                            st.write(f"• {model} - ₹{prices[i]:,}")
+
+if __name__ == "__main__":
+    main()
