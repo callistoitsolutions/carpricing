@@ -8,4 +8,6 @@ seaborn
 plotly
 joblib
 python-pptx
+reportlab
+
 
